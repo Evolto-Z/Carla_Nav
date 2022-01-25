@@ -23,12 +23,12 @@ obs = env.reset()
 policy = MyPolicy(env.get_hero())
 
 
-cnt = 64
+# cnt = 64
 while True:
     control = policy.inference()
     env.step(control)
-    cnt -= 1
-    if cnt == 0:
-        cv2.imshow("demo", obs)
-        cv2.waitKey(0)
-        cv2.destroyAllWindows()
+    # cnt -= 1
+    # if cnt == 0:
+    #     cv2.imshow("demo", obs)
+    #     cv2.waitKey(0)
+    #     cv2.destroyAllWindows()

@@ -82,7 +82,7 @@ class CarlaCore:
 
         if self.config["show_display"]:
             server_command = [
-                "{}/CarlaUE4.sh".format(os.environ["CARLA_ROOT"]),
+                "{}/CarlaUE4.exe".format(os.environ["CARLA_ROOT"]),
                 "-windowed",
                 "-ResX={}".format(self.config["resolution_x"]),
                 "-ResY={}".format(self.config["resolution_y"]),
@@ -90,7 +90,7 @@ class CarlaCore:
         else:
             server_command = [
                 "DISPLAY= ",
-                "{}/CarlaUE4.sh".format(os.environ["CARLA_ROOT"]),
+                "{}/CarlaUE4.exe".format(os.environ["CARLA_ROOT"]),
                 "-opengl"  # no-display isn't supported for Unreal 4.24 with vulkan
             ]
 
@@ -104,7 +104,7 @@ class CarlaCore:
         server_process = subprocess.Popen(
             server_command_text,
             shell=True,
-            preexec_fn=os.setsid,
+            # preexec_fn=os.setsid,
             stdout=open(os.devnull, "w"),
         )
 
