@@ -1,15 +1,11 @@
 env_config:
   carla:
     host: "localhost"
-    timeout: 30.0
-    timestep: 0.05
-    retries_on_error: 25
+    port: 2000
     resolution_x: 1280
     resolution_y: 720
     quality_level: "Epic"
-    enable_map_assets: True
     enable_rendering: True
-    show_display: True
 
   experiment:
     hero:
@@ -17,48 +13,63 @@ env_config:
       sensors:
         camera_rgb:
           type: "sensor.camera.rgb"
-          image_size_x: 200
-          image_size_y: 88
+          image_size_x: 288
+          image_size_y: 216
           transform: 0,0,2.4,0,0,0
-      spawn_points: [
-        "-130.80254883,103.26209961,1",  # x,y,z[,roll,pitch,yaw]
-        "-258.58019531,0.32128639,1",
-        "-130.50441406,136.6653125,1",
-        "-258.58871094,-3.82127594,1",
-        "-188.099101566,-101.55841797,1",
-        "-120.81304688,-127.37759766,1",
-        "143.90660156,1.53764084,1",
-        "-51.00605469,112.90189453,1",
-        "-127.00455078,136.63408203,1",
-        "-248.39375,86.93456055,1",
-        "82.57344727,-143.86496094,1",
-        "60.38806641,-87.59395508,1",
-        "76.17259766,145.39817383,1",
-        "-169.49910156, -144.75841797,1",
-        "106.59984375, -48.29285156, 1",
-        "59.72867188, 95.25668945, 1",
-        "-276.03814453, 58.77165039, 1",
-        "-239.69027344, -95.16041016, 1",
-        "-191.54279297, 117.29594727, 1",
-        "103.57628906, -62.79506836, 1",
-        "151.52549805, 80.119375, 1",
-        "70.33907227, 93.09503906, 1",
-        "-195.05011719, 76.0861377, 1",
-        "36.48416992, -76.58737793, 1",
-        "-54.1016748, 13.33402832, 1",
-        "-184.58589844, -53.54149902, 1",
-        "90.15171875, 1.95712494, 1",
-        "37.87285156, -128.50666016, 1",
-        "-88.96650391, 94.96491211, 1",
-        "-18.79371826, -84.42214844, 1",
-        "-124.77713867, -59.83091309, 1",
-        "-162.53725586, -84.63864258, 1",
-        "69.41578613, -190.24716797, 1",
-        "207.23964844, -11.23129517, 1",
-        "37.30215332, 208.75220703, 1"
-        ]
     background_activity:
-      n_vehicles: 32
-      n_walkers: 64
+      n_vehicles: [32, 64]
+      n_walkers: [32, 64]
       tm_hybrid_mode: True
-    town: "Town05_Opt"
+
+
+policy_config:
+  emergency_brake: 1.0
+  sampling_resolution: 2.0  # meters, for global route planning
+  local_planner:
+    target_speed: 20  # km/h
+    follow_speed_limits: False
+    sampling_radius: 2.0  # meters
+    base_min_distance: 3.0  # meters
+    max_throttle: 0.75
+    max_brake: 0.3
+    max_steering: 0.8
+
+
+guider_config:
+  base_tlight_threshold: 5.0  # meters
+  base_vehicle_threshold: 5.0  # meters
+  emergency_brake: 1.0
+  ignore_traffic_lights: False
+  ignore_stop_signs: False
+  ignore_vehicles: False
+  sampling_resolution: 2.0  # meters, for global route planning
+  local_planner:
+    target_speed: 20  # km/h
+    follow_speed_limits: False
+    sampling_radius: 2.0  # meters
+    base_min_distance: 3.0  # meters
+    max_throttle: 0.75
+    max_brake: 0.3
+    max_steering: 0.8
+    lateral_pid: [ 1.95, 0.05, 0.2 ]
+    longitudinal_pid: [ 1.0, 0.05, 0 ]
+    offset: 0
+
+
+trainer_config:
+  gamma: 0.99  # reward discount
+  alpha: 0.2  # entropy weight
+  polyak: 0.995  # synchronize weight
+  lr_il: 0.001
+  loss_weights: [1, 1, 1, 1, 1]
+  lr_rl_actor: 0.001
+  lr_rl_critic: 0.001
+
+
+total_il_epoch: 3
+total_rl_epoch: 128
+il_batch_size: 1
+il_horizon: 32
+rl_batch_size: 16
+debug: True
+seed: null

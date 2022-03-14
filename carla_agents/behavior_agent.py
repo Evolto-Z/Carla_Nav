@@ -8,14 +8,18 @@
 waypoints and avoiding other vehicles. The agent also responds to traffic lights,
 traffic signs, and has different possible configurations. """
 
-import random
 import numpy as np
 import carla
-from ..navigation.basic_agent import BasicAgent
-from ..navigation.local_planner import RoadOption
-from ..navigation.behavior_types import Cautious, Aggressive, Normal
+from carla_agents.basic_agent import BasicAgent
+from carla_agents.local_planner import RoadOption
+from carla_agents.behavior_types import Cautious, Aggressive, Normal
+from rllib_integration.helper import join_dicts
+from tools.misc import get_speed, positive
 
-from ..tools.misc import get_speed, positive, is_within_distance, compute_distance
+DEFAULT_CONFIG = {
+    "behavior": "normal"  # cautious, normal or aggressive
+}
+
 
 class BehaviorAgent(BasicAgent):
     """
@@ -29,18 +33,21 @@ class BehaviorAgent(BasicAgent):
     and keeping it in a certain range. Finally, different sets of behaviors
     are encoded in the agent, from cautious to a more aggressive ones.
     """
+    def __init__(self, config={}):
+        super(BehaviorAgent, self).__init__(config)
 
-    def __init__(self, vehicle, behavior='normal'):
-        """
-        Constructor method.
-
-            :param vehicle: actor to apply to local planner logic onto
-            :param ignore_traffic_light: boolean to ignore any traffic light
-            :param behavior: type of agent to apply
-        """
-
-        super(BehaviorAgent, self).__init__(vehicle)
-        self._look_ahead_steps = 0
+        # Base parameters
+        config = join_dicts(config, DEFAULT_CONFIG)
+        behavior = config["behavior"]
+        # Parameters for agent behavior
+        if behavior == "cautious":
+            self._behavior = Cautious()
+        elif behavior == "normal":
+            self._behavior = Normal()
+        elif behavior == "aggressive":
+            self._behavior = Aggressive()
+        else:
+            self._behavior = None
 
         # Vehicle information
         self._speed = 0
@@ -49,18 +56,22 @@ class BehaviorAgent(BasicAgent):
         self._incoming_direction = None
         self._incoming_waypoint = None
         self._min_speed = 5
-        self._behavior = None
         self._sampling_resolution = 4.5
 
-        # Parameters for agent behavior
-        if behavior == 'cautious':
-            self._behavior = Cautious()
+        self._look_ahead_steps = 0
 
-        elif behavior == 'normal':
-            self._behavior = Normal()
+        # Traffic light information
+        self._tl_affected = False
+        self._tl_state = carla.TrafficLightState.Unknown
 
-        elif behavior == 'aggressive':
-            self._behavior = Aggressive()
+    def get_state_traffic_light(self):
+        return self._tl_affected, self._tl_state
+
+    def get_state_speed(self):
+        return self._speed
+
+    def get_state_junction(self):
+        return self._incoming_waypoint.is_junction
 
     def _update_information(self):
         """
@@ -74,30 +85,21 @@ class BehaviorAgent(BasicAgent):
         if self._direction is None:
             self._direction = RoadOption.LANEFOLLOW
 
-        self._look_ahead_steps = int((self._speed_limit) / 10)
+        self._look_ahead_steps = int(self._speed_limit / 10)
 
         self._incoming_waypoint, self._incoming_direction = self._local_planner.get_incoming_waypoint_and_direction(
             steps=self._look_ahead_steps)
         if self._incoming_direction is None:
             self._incoming_direction = RoadOption.LANEFOLLOW
 
-    def traffic_light_manager(self):
-        """
-        This method is in charge of behaviors for red lights.
-        """
-        actor_list = self._world.get_actors()
-        lights_list = actor_list.filter("*traffic_light*")
-        affected, _ = self._affected_by_traffic_light(lights_list)
-
-        return affected
+        self._tl_affected, self._tl_state = self._affected_by_traffic_light()
 
     def _tailgating(self, waypoint, vehicle_list):
         """
         This method is in charge of tailgating behaviors.
 
-            :param location: current location of the agent
-            :param waypoint: current waypoint of the agent
-            :param vehicle_list: list of all the nearby vehicles
+        :param waypoint: current waypoint of the agent
+        :param vehicle_list: list of all the nearby vehicles
         """
 
         left_turn = waypoint.left_lane_marking.lane_change
@@ -109,36 +111,111 @@ class BehaviorAgent(BasicAgent):
         behind_vehicle_state, behind_vehicle, _ = self._vehicle_obstacle_detected(vehicle_list, max(
             self._behavior.min_proximity_threshold, self._speed_limit / 2), up_angle_th=180, low_angle_th=160)
         if behind_vehicle_state and self._speed < get_speed(behind_vehicle):
-            if (right_turn == carla.LaneChange.Right or right_turn ==
-                    carla.LaneChange.Both) and waypoint.lane_id * right_wpt.lane_id > 0 and right_wpt.lane_type == carla.LaneType.Driving:
+            if (right_turn == carla.LaneChange.Right or
+                right_turn == carla.LaneChange.Both) and \
+                    waypoint.lane_id * right_wpt.lane_id > 0 and \
+                    right_wpt.lane_type == carla.LaneType.Driving:
                 new_vehicle_state, _, _ = self._vehicle_obstacle_detected(vehicle_list, max(
                     self._behavior.min_proximity_threshold, self._speed_limit / 2), up_angle_th=180, lane_offset=1)
                 if not new_vehicle_state:
                     print("Tailgating, moving to the right!")
                     end_waypoint = self._local_planner.target_waypoint
                     self._behavior.tailgate_counter = 200
-                    self.set_destination(end_waypoint.transform.location,
-                                         right_wpt.transform.location)
-            elif left_turn == carla.LaneChange.Left and waypoint.lane_id * left_wpt.lane_id > 0 and left_wpt.lane_type == carla.LaneType.Driving:
+                    self.set_destination(end_waypoint.transform.location)
+            elif left_turn == carla.LaneChange.Left and \
+                    waypoint.lane_id * left_wpt.lane_id > 0 and \
+                    left_wpt.lane_type == carla.LaneType.Driving:
                 new_vehicle_state, _, _ = self._vehicle_obstacle_detected(vehicle_list, max(
                     self._behavior.min_proximity_threshold, self._speed_limit / 2), up_angle_th=180, lane_offset=-1)
                 if not new_vehicle_state:
                     print("Tailgating, moving to the left!")
                     end_waypoint = self._local_planner.target_waypoint
                     self._behavior.tailgate_counter = 200
-                    self.set_destination(end_waypoint.transform.location,
-                                         left_wpt.transform.location)
+                    self.set_destination(end_waypoint.transform.location)
+
+    def run_step(self, debug=False):
+        """
+        Execute one step of navigation.
+
+            :param debug: boolean for debugging
+            :return control: carla.VehicleControl
+        """
+        self._update_information()
+
+        if self._behavior.tailgate_counter > 0:
+            self._behavior.tailgate_counter -= 1
+
+        ego_vehicle_loc = self._vehicle.get_location()
+        ego_vehicle_wp = self._map.get_waypoint(ego_vehicle_loc)
+
+        # 1: Red lights and stops behavior
+        if self._tl_affected and self._tl_state == carla.TrafficLightState.Red:
+            return self.emergency_stop()
+
+        # 2.1: Pedestrian avoidance behaviors
+        walker_state, walker, w_distance = self.pedestrian_avoid_manager(ego_vehicle_wp)
+
+        if walker_state:
+            # Distance is computed from the center of the two cars,
+            # we use bounding boxes to calculate the actual distance
+            distance = w_distance - max(
+                walker.bounding_box.extent.y, walker.bounding_box.extent.x) - max(
+                    self._vehicle.bounding_box.extent.y, self._vehicle.bounding_box.extent.x)
+
+            # Emergency brake if the car is very close.
+            if distance < self._behavior.braking_distance:
+                return self.emergency_stop()
+
+        # 2.2: Car following behaviors
+        vehicle_state, vehicle, distance = self.collision_and_car_avoid_manager(ego_vehicle_wp)
+
+        if vehicle_state:
+            # Distance is computed from the center of the two cars,
+            # we use bounding boxes to calculate the actual distance
+            distance = distance - max(
+                vehicle.bounding_box.extent.y, vehicle.bounding_box.extent.x) - max(
+                    self._vehicle.bounding_box.extent.y, self._vehicle.bounding_box.extent.x)
+
+            # Emergency brake if the car is very close.
+            if distance < self._behavior.braking_distance:
+                return self.emergency_stop()
+            else:
+                control = self.car_following_manager(vehicle, distance)
+
+        # 3: Intersection behavior
+        elif self._incoming_waypoint.is_junction and (self._incoming_direction in [RoadOption.LEFT, RoadOption.RIGHT]):
+            target_speed = min([
+                self._behavior.max_speed,
+                self._speed_limit - 5])
+            self._local_planner.set_speed(target_speed)
+            control = self._local_planner.run_step(debug=debug)
+
+        # 4: Normal behavior
+        else:
+            target_speed = min([
+                self._behavior.max_speed,
+                self._speed_limit - self._behavior.speed_lim_dist])
+            self._local_planner.set_speed(target_speed)
+            control = self._local_planner.run_step(debug=debug)
+
+        return control
+
+    def emergency_stop(self):
+        control = carla.VehicleControl()
+        control.throttle = 0.0
+        control.brake = self._emergency_brake
+        control.hand_brake = False
+        return control
 
     def collision_and_car_avoid_manager(self, waypoint):
         """
         This module is in charge of warning in case of a collision
         and managing possible tailgating chances.
 
-            :param location: current location of the agent
-            :param waypoint: current waypoint of the agent
-            :return vehicle_state: True if there is a vehicle nearby, False if not
-            :return vehicle: nearby vehicle
-            :return distance: distance to nearby vehicle
+        :param waypoint: current waypoint of the agent
+        :return vehicle_state: True if there is a vehicle nearby, False if not
+        :return vehicle: nearby vehicle
+        :return distance: distance to nearby vehicle
         """
 
         vehicle_list = self._world.get_actors().filter("*vehicle*")
@@ -171,11 +248,10 @@ class BehaviorAgent(BasicAgent):
         This module is in charge of warning in case of a collision
         with any pedestrian.
 
-            :param location: current location of the agent
-            :param waypoint: current waypoint of the agent
-            :return vehicle_state: True if there is a walker nearby, False if not
-            :return vehicle: nearby walker
-            :return distance: distance to nearby walker
+        :param waypoint: current waypoint of the agent
+        :return vehicle_state: True if there is a walker nearby, False if not
+        :return vehicle: nearby walker
+        :return distance: distance to nearby walker
         """
 
         walker_list = self._world.get_actors().filter("*walker.pedestrian*")
@@ -235,85 +311,4 @@ class BehaviorAgent(BasicAgent):
             self._local_planner.set_speed(target_speed)
             control = self._local_planner.run_step(debug=debug)
 
-        return control
-
-    def run_step(self, debug=False):
-        """
-        Execute one step of navigation.
-
-            :param debug: boolean for debugging
-            :return control: carla.VehicleControl
-        """
-        self._update_information()
-
-        control = None
-        if self._behavior.tailgate_counter > 0:
-            self._behavior.tailgate_counter -= 1
-
-        ego_vehicle_loc = self._vehicle.get_location()
-        ego_vehicle_wp = self._map.get_waypoint(ego_vehicle_loc)
-
-        # 1: Red lights and stops behavior
-        if self.traffic_light_manager():
-            return self.emergency_stop()
-
-        # 2.1: Pedestrian avoidance behaviors
-        walker_state, walker, w_distance = self.pedestrian_avoid_manager(ego_vehicle_wp)
-
-        if walker_state:
-            # Distance is computed from the center of the two cars,
-            # we use bounding boxes to calculate the actual distance
-            distance = w_distance - max(
-                walker.bounding_box.extent.y, walker.bounding_box.extent.x) - max(
-                    self._vehicle.bounding_box.extent.y, self._vehicle.bounding_box.extent.x)
-
-            # Emergency brake if the car is very close.
-            if distance < self._behavior.braking_distance:
-                return self.emergency_stop()
-
-        # 2.2: Car following behaviors
-        vehicle_state, vehicle, distance = self.collision_and_car_avoid_manager(ego_vehicle_wp)
-
-        if vehicle_state:
-            # Distance is computed from the center of the two cars,
-            # we use bounding boxes to calculate the actual distance
-            distance = distance - max(
-                vehicle.bounding_box.extent.y, vehicle.bounding_box.extent.x) - max(
-                    self._vehicle.bounding_box.extent.y, self._vehicle.bounding_box.extent.x)
-
-            # Emergency brake if the car is very close.
-            if distance < self._behavior.braking_distance:
-                return self.emergency_stop()
-            else:
-                control = self.car_following_manager(vehicle, distance)
-
-        # 3: Intersection behavior
-        elif self._incoming_waypoint.is_junction and (self._incoming_direction in [RoadOption.LEFT, RoadOption.RIGHT]):
-            target_speed = min([
-                self._behavior.max_speed,
-                self._speed_limit - 5])
-            self._local_planner.set_speed(target_speed)
-            control = self._local_planner.run_step(debug=debug)
-
-        # 4: Normal behavior
-        else:
-            target_speed = min([
-                self._behavior.max_speed,
-                self._speed_limit - self._behavior.speed_lim_dist])
-            self._local_planner.set_speed(target_speed)
-        control = self._local_planner.run_step(debug=debug)
-
-        return control
-
-    def emergency_stop(self):
-        """
-        Overwrites the throttle a brake values of a control to perform an emergency stop.
-        The steering is kept the same to avoid going out of the lane when stopping during turns
-
-            :param speed (carl.VehicleControl): control to be modified
-        """
-        control = carla.VehicleControl()
-        control.throttle = 0.0
-        control.brake = self._max_brake
-        control.hand_brake = False
         return control

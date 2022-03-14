@@ -9,6 +9,7 @@
 from rllib_integration.sensors.sensor import *
 from rllib_integration.sensors.bird_view_manager import BirdviewManager
 
+
 class SensorFactory(object):
     """
     Class to simplify the creation of the different CARLA sensors

@@ -13,21 +13,28 @@ import numpy as np
 import networkx as nx
 
 import carla
-from ..navigation.local_planner import RoadOption
-from ..tools.misc import vector
+from carla_agents.local_planner import RoadOption
+from tools.misc import vector
+
 
 class GlobalRoutePlanner(object):
     """
     This class provides a very high level route plan.
     """
 
-    def __init__(self, wmap, sampling_resolution):
+    def __init__(self, sampling_resolution):
         self._sampling_resolution = sampling_resolution
-        self._wmap = wmap
+        self._wmap = None
         self._topology = None
         self._graph = None
         self._id_map = None
         self._road_id_to_edge = None
+
+        self._intersection_end_node = -1
+        self._previous_decision = RoadOption.VOID
+
+    def reset(self, wmap):
+        self._wmap = wmap
 
         self._intersection_end_node = -1
         self._previous_decision = RoadOption.VOID

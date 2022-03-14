@@ -8,17 +8,32 @@
 
 """ Module with auxiliary functions. """
 
+from enum import Enum
 import math
 import numpy as np
 import carla
+
+
+class RoadOption(Enum):
+    """
+    RoadOption represents the possible topological configurations when moving from a segment of lane to other.
+    """
+    VOID = -1
+    LEFT = 1
+    RIGHT = 2
+    STRAIGHT = 3
+    LANEFOLLOW = 4
+    CHANGELANELEFT = 5
+    CHANGELANERIGHT = 6
+
 
 def draw_waypoints(world, waypoints, z=0.5):
     """
     Draw a list of waypoints at a certain height given in z.
 
-        :param world: carla.world object
-        :param waypoints: list or iterable container with the waypoints to draw
-        :param z: height in meters
+    :param world: carla.world object
+    :param waypoints: list or iterable container with the waypoints to draw
+    :param z: height in meters
     """
     for wpt in waypoints:
         wpt_t = wpt.transform
@@ -32,12 +47,13 @@ def get_speed(vehicle):
     """
     Compute speed of a vehicle in Km/h.
 
-        :param vehicle: the vehicle for which speed is calculated
-        :return: speed as a float in Km/h
+    :param vehicle: the vehicle for which speed is calculated
+    :return: speed as a float in Km/h
     """
     vel = vehicle.get_velocity()
 
     return 3.6 * math.sqrt(vel.x ** 2 + vel.y ** 2 + vel.z ** 2)
+
 
 def get_trafficlight_trigger_location(traffic_light):
     """
@@ -107,10 +123,10 @@ def compute_magnitude_angle(target_location, current_location, orientation):
     """
     Compute relative angle and distance between a target_location and a current_location
 
-        :param target_location: location of the target object
-        :param current_location: location of the reference object
-        :param orientation: orientation of the reference object
-        :return: a tuple composed by the distance to the object and the angle between both objects
+    :param target_location: location of the target object
+    :param current_location: location of the reference object
+    :param orientation: orientation of the reference object
+    :return: a tuple composed by the distance to the object and the angle between both objects
     """
     target_vector = np.array([target_location.x - current_location.x, target_location.y - current_location.y])
     norm_target = np.linalg.norm(target_vector)
@@ -118,7 +134,7 @@ def compute_magnitude_angle(target_location, current_location, orientation):
     forward_vector = np.array([math.cos(math.radians(orientation)), math.sin(math.radians(orientation))])
     d_angle = math.degrees(math.acos(np.clip(np.dot(forward_vector, target_vector) / norm_target, -1., 1.)))
 
-    return (norm_target, d_angle)
+    return norm_target, d_angle
 
 
 def distance_vehicle(waypoint, vehicle_transform):
@@ -135,11 +151,12 @@ def distance_vehicle(waypoint, vehicle_transform):
     return math.sqrt(x * x + y * y)
 
 
-def vector(location_1, location_2):
+def vector(location_1: carla.Location, location_2: carla.Location):
     """
     Returns the unit vector from location_1 to location_2
 
-        :param location_1, location_2: carla.Location objects
+    :param location_1: carla.Location objects
+    :param location_2: carla.Location objects
     """
     x = location_2.x - location_1.x
     y = location_2.y - location_1.y
@@ -149,11 +166,12 @@ def vector(location_1, location_2):
     return [x / norm, y / norm, z / norm]
 
 
-def compute_distance(location_1, location_2):
+def compute_distance(location_1: carla.Location, location_2: carla.Location):
     """
     Euclidean distance between 3D points
 
-        :param location_1, location_2: 3D points
+    :param location_1: carla.Location objects
+    :param location_2: carla.Location objects
     """
     x = location_2.x - location_1.x
     y = location_2.y - location_1.y
@@ -169,3 +187,12 @@ def positive(num):
         :param num: value to check
     """
     return num if num > 0.0 else 0.0
+
+
+def compute_action(control: carla.VehicleControl):
+    if control.brake == 0.0:
+        acceleration = -control.brake
+    else:
+        acceleration = control.throttle
+    steering = control.steer
+    return acceleration, steering

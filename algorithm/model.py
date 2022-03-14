@@ -4,11 +4,15 @@ from torch import nn
 from torch.nn import functional as F
 from torch import distributions as td
 from torchvision import models
-from algorithm.utils import create_resnet_basic_block, TanhBijector
+from algorithm.nn_modules import TanhBijector
 from typing import Any, List, Tuple
-from torch import TensorType
+from torch import Tensor
+from tools.misc import RoadOption
 
 ActFunc = Any
+DYNAMIC_EMBED_SIZE = 2048
+STATIC_EMBED_SIZE = 6144
+EMBED_SIZE = DYNAMIC_EMBED_SIZE + STATIC_EMBED_SIZE
 
 
 class ConvEncoder(nn.Module):
@@ -76,94 +80,31 @@ class ConvEncoder(nn.Module):
         return x
 
 
-# class SegDecoder(nn.Module):
-#     """
-#     Input shape: (6144,)
-#     Output shape: (num_class, 74, 128)
-#     """
-#
-#     def __init__(self,
-#                  num_class: int = 6,  # moving obstacles, traffic lights, road markers, road, sidewalk and background.
-#                  shape: Tuple[int, int, int] = (512, 3, 4)
-#                  ):
-#         super().__init__()
-#
-#         self.shape = shape
-#
-#         # We will upsample image with nearest neightboord interpolation between each umsample block
-#         # https://distill.pub/2016/deconv-checkerboard/
-#         self.up_sampled_block_0 = create_resnet_basic_block(6, 8, 512, 512)
-#         self.up_sampled_block_1 = create_resnet_basic_block(12, 16, 512, 256)
-#         self.up_sampled_block_2 = create_resnet_basic_block(24, 32, 256, 128)
-#         self.up_sampled_block_3 = create_resnet_basic_block(48, 64, 128, 64)
-#         self.up_sampled_block_4 = create_resnet_basic_block(74, 128, 64, 32)
-#
-#         self.last_conv_segmentation = nn.Conv2d(
-#             32,
-#             num_class,
-#             kernel_size=(1, 1),
-#             stride=(1, 1),
-#             bias=False,
-#         )
-#
-#     def forward(self, x):
-#         # Flatten to [batch * horizon, C, H, W]
-#         orig_shape = list(x.size())
-#         x = x.view(-1, *self.shape)
-#
-#         # Segmentation branch
-#         x = self.up_sampled_block_0(x)  # 512*8*8
-#         x = self.up_sampled_block_1(x)  # 256*16*16
-#         x = self.up_sampled_block_2(x)  # 128*32*32
-#         x = self.up_sampled_block_3(x)  # 64*64*64
-#         x = self.up_sampled_block_4(x)  # 32*128*128
-#
-#         x = F.softmax(self.last_conv_segmentation(x), -1)
-#
-#         new_shape = orig_shape[:-1] + list(x.size())[-3:]
-#         x = x.view(*new_shape)
-#
-#         return x
-
-
 class TrafficLightDecoder(nn.Module):
     def __init__(self,
-                 input_size: int = 1024,
+                 input_size: int = EMBED_SIZE,
                  hidden_size: int = 256):
         super().__init__()
 
         self.fc = nn.Linear(input_size, hidden_size)
-        self.presence_head = nn.Linear(
+        self.affected_head = nn.Linear(
             hidden_size, 1
-        )  # Classification: present or not
+        )  # Classification: affected or not
         self.signal_head = nn.Linear(
             hidden_size, 3
         )  # Classification: red, orange or green
-        self.distance_head = nn.Linear(
-            hidden_size, 1
-        )  # Classification: near to traffic_light or not
 
     def forward(self, x):
-        # reshape to [batch * horizon, D]
-        orig_shape = list(x.size())
-        x = x.contiguous().view([-1] + orig_shape[-1:])
-
         x = F.elu(self.fc(x))
-        presence = torch.sigmoid(self.presence_head(x)).squeeze(dim=-1)
-        signal = F.softmax(self.signal_head(x), dim=-1)
-        distance = torch.sigmoid(self.distance_head(x)).squeeze(dim=-1)
+        affected = self.affected_head(x).squeeze(dim=-1)
+        signal = self.signal_head(x)
 
-        # reshape to [batch, horizon, D]
-        presence = presence.view(orig_shape[:-1] + [-1])
-        signal = signal.view(orig_shape[:-1] + [-1])
-        distance = distance.view(orig_shape[:-1] + [-1])
-
-        return presence, signal, distance
+        return affected, signal
 
 
 class JunctionDecoder(nn.Module):
     def __init__(self,
-                 input_size: int = 1024,
+                 input_size: int = STATIC_EMBED_SIZE,
                  hidden_size: int = 256,
                  ):
         super().__init__()
@@ -174,49 +115,52 @@ class JunctionDecoder(nn.Module):
         )  # Classification present or not
 
     def forward(self, x):
-        # reshape to [batch * horizon, D]
-        orig_shape = list(x.size())
-        x = x.contiguous().view([-1] + orig_shape[-1:])
-
         x = F.elu(self.fc(x))
-        presence = torch.sigmoid(self.presence_head(x))
-        presence = presence.squeeze(dim=-1)
-
-        # reshape to [batch, horizon, D]
-        presence = presence.view(orig_shape[:-1] + [-1])
+        presence = self.presence_head(x).squeeze(dim=-1)
 
         return presence
 
 
-class LaneDecoder(nn.Module):
+class SpeedDecoder(nn.Module):
     def __init__(self,
-                 input_size: int = 1024,
-                 hidden_size: int = 256
+                 input_size: int = DYNAMIC_EMBED_SIZE,
+                 hidden_size: int = 256,
                  ):
         super().__init__()
 
         self.fc = nn.Linear(input_size, hidden_size)
-        self.offset_head = nn.Linear(
+        self.speed_head = nn.Linear(
             hidden_size, 1
-        )  # Classification: closely in the middle of the lane or not.
-        self.yaw_head = nn.Linear(
-            hidden_size, 1
-        )  # Classification: closely follow the lane or not
+        )  # km/h
 
     def forward(self, x):
-        # reshape to [batch * horizon, D]
-        orig_shape = list(x.size())
-        x = x.contiguous().view([-1] + orig_shape[-1:])
-
         x = F.elu(self.fc(x))
-        offset = torch.sigmoid(self.offset_head(x))
-        yaw = torch.sigmoid(self.yaw_head(x))
+        speed = self.speed_head(x).squeeze(dim=-1)
 
-        # reshape to [batch, horizon, D]
-        offset = offset.view(orig_shape[:-1] + [-1])
-        yaw = yaw.view(orig_shape[:-1] + [-1])
+        return speed
 
-        return offset, yaw
+
+# class LaneDecoder(nn.Module):
+#     def __init__(self,
+#                  input_size: int = EMBED_SIZE,
+#                  hidden_size: int = 256
+#                  ):
+#         super().__init__()
+#
+#         self.fc = nn.Linear(input_size, hidden_size)
+#         self.offset_head = nn.Linear(
+#             hidden_size, 1
+#         )  # Classification: has offset or not.
+#         self.yaw_head = nn.Linear(
+#             hidden_size, 1
+#         )  # Classification: has yaw or not.
+#
+#     def forward(self, x):
+#         x = F.elu(self.fc(x))
+#         offset = self.offset_head(x).squeeze(dim=-1)
+#         yaw = self.yaw_head(x).squeeze(dim=-1)
+#
+#         return offset, yaw
 
 
 class ActionDecoder(nn.Module):
@@ -227,17 +171,19 @@ class ActionDecoder(nn.Module):
 
     def __init__(self,
                  action_size: int,
-                 input_size: int = 7168,
-                 units: Tuple[int,] = (1024, 256),
+                 input_size: int = EMBED_SIZE,
+                 units: Tuple[int] = (1024, 256),
+                 num_head: int = 6,
                  act: ActFunc = None,
                  min_std: float = 1e-4,
                  init_std: float = 5.0,
-                 mean_scale: float = 5.0):
+                 mean_scale: float = 5.0
+                 ):
         """Initializes Policy
 
         Args:
-            input_size (int): Input size to network
             action_size (int): Action space size
+            input_size (int): Input size to network
             units (Tuple[int,]): Size of the hidden layers
             act (Any): Activation function
             min_std (float): Minimum std for output distribution
@@ -246,6 +192,7 @@ class ActionDecoder(nn.Module):
         """
         super().__init__()
         self.units = units
+        self.num_head = num_head
         self.act = act
         if not act:
             self.act = nn.ReLU
@@ -254,90 +201,167 @@ class ActionDecoder(nn.Module):
         self.mean_scale = mean_scale
         self.action_size = action_size
 
-        self.layers = []
+        self.heads = []
         self.softplus = nn.Softplus()
 
         # MLP Construction
-        cur_size = input_size
-        for unit in self.units:
-            self.layers.extend([nn.Linear(cur_size, unit), self.act()])
-            cur_size = unit
-
-        self.layers.append(nn.Linear(cur_size, 2 * action_size))
-
-        self.model = nn.Sequential(*self.layers)
+        self.fc = nn.Sequential(
+            nn.Linear(input_size, self.units[0]),
+            self.act()
+        )
+        for _ in range(num_head):
+            layers = []
+            cur_size = self.units[0]
+            for unit in self.units[1:]:
+                layers.extend([nn.Linear(cur_size, unit), self.act()])
+                cur_size = unit
+            layers.append(nn.Linear(cur_size, 2 * action_size))
+            head = nn.Sequential(*layers)
+            self.heads.append(head)
 
     # Returns distribution
-    def forward(self, x):
-        # reshape to [batch * horizon, D]
-        orig_shape = list(x.size())
-        x = x.contiguous().view([-1] + orig_shape[-1:])
-
-        raw_init_std = np.log(np.exp(self.init_std) - 1)
-        x = self.model(x)
-
-        # reshape to [batch, horizon, D]
-        x = x.view(orig_shape[:-1] + [-1])
+    def forward(self, x: Tensor, command: List[RoadOption]):
+        x = self.fc(x)
+        x = torch.split(x, 1, dim=0)
+        x = list(map(lambda item: self.heads[item[0].value - 1](item[1]), zip(command, x)))
+        x = torch.concat(x, dim=0)
 
         mean, std = torch.chunk(x, 2, dim=-1)
         mean = self.mean_scale * torch.tanh(mean / self.mean_scale)
+        raw_init_std = np.log(np.exp(self.init_std) - 1)
         std = self.softplus(std + raw_init_std) + self.min_std
         dist = td.Normal(mean, std)
         transforms = [TanhBijector()]
-        dist = td.transformed_distribution.TransformedDistribution(
-            dist, transforms)
+        dist = td.transformed_distribution.TransformedDistribution(dist, transforms)
         dist = td.Independent(dist, 1)
 
         return dist
 
 
+class ValueDecoder(nn.Module):
+    """
+    It outputs the mean of cumulative return.
+    """
+
+    def __init__(self,
+                 action_size: int = 2,
+                 input_size: int = EMBED_SIZE,
+                 units: Tuple[int] = (1024, 256),
+                 act: ActFunc = None
+                 ):
+        """Initializes Policy
+
+        Args:
+            input_size (int): Input size to network
+            units (Tuple[int,]): Size of the hidden layers
+            act (Any): Activation function
+        """
+        super().__init__()
+        self.units = units
+        self.act = act
+        if not act:
+            self.act = nn.ELU
+
+        self.softplus = nn.Softplus()
+
+        # MLP Construction
+        self.fc = nn.Sequential(
+            nn.Linear(input_size, self.units[0]),
+            self.act()
+        )
+        self.layers = []
+        cur_size = self.units[0] + action_size
+        for unit in self.units[1:]:
+            self.layers.extend([nn.Linear(cur_size, unit), self.act()])
+            cur_size = unit
+
+        self.layers.append(nn.Linear(cur_size, 1))
+
+        self.model = nn.Sequential(*self.layers)
+
+    # Returns distribution
+    def forward(self, x: Tensor, action: Tensor):
+        x = self.fc(x)
+        x = torch.concat([x, action], dim=-1)
+        value = self.model(x).squeeze(dim=-1)
+
+        return value
+
+
 class MyModel(nn.Module):
     def __init__(self,
-                 num_output: int = 3,
-                 cell_size: int = 1024
+                 action_dim: int = 2,
+                 cell_size: int = DYNAMIC_EMBED_SIZE,
                  ):
         super().__init__()
 
         self.cell_size = cell_size
-        self.state = None
+        self.cell_state = None
 
         self.encoder = ConvEncoder()
-        self.cell = nn.GRU(6144, cell_size, batch_first=True)
-        self.tl_decoder = TrafficLightDecoder()
-        self.juction_decoder = JunctionDecoder()
-        self.lane_decoder = LaneDecoder()
-        self.action_decoder = ActionDecoder(num_output)
+        self.cell = nn.GRU(STATIC_EMBED_SIZE, cell_size, batch_first=True)
+        self.tl_decoder = TrafficLightDecoder(EMBED_SIZE)
+        self.junction_decoder = JunctionDecoder(STATIC_EMBED_SIZE)
+        self.speed_decoder = SpeedDecoder(DYNAMIC_EMBED_SIZE)
+        self.actor = ActionDecoder(action_dim)
+        self.critic = ValueDecoder()
 
-    def reset(self):
-        self.state = None
+    def reset_cell(self):
+        self.cell_state = None
 
-    def encode(self, x):
+    def encode(self, x: Tensor):
         orig_shape = list(x.size())
 
         static_embed = self.encoder(x)
-
-        if self.state is None:
+        if self.cell_state is None:
             state_shape = [1, orig_shape[0], self.cell_size]
-            self.state = torch.zeros(state_shape).to(x.device)
+            self.cell_state = torch.zeros(state_shape).to(x.device)
+
+        flag = False
         if static_embed.ndim == 2:
             static_embed = static_embed.unsqueeze(dim=1)
-        dynamic_embed, self.state = self.cell(static_embed, self.state)
+            flag = True
+        dynamic_embed, self.cell_state = self.cell(static_embed.detach(), self.cell_state)
+        if flag:
+            static_embed = static_embed.squeeze(dim=1)
+            dynamic_embed = dynamic_embed.squeeze(dim=1)
 
         return dynamic_embed, static_embed
 
-    def decode(self, dynamic_embed, static_embed):
-        tl_pred = self.tl_decoder(dynamic_embed)
-        junction_pred = self.juction_decoder(dynamic_embed)
-        lane_pred = self.lane_decoder(dynamic_embed)
+    def auxiliary_decode(self,
+                         dynamic_embed: Tensor,
+                         static_embed: Tensor
+                         ):
         embed = torch.concat([dynamic_embed, static_embed], dim=-1)
-        action_dist = self.action_decoder(embed)
-        return tl_pred, junction_pred, lane_pred, action_dist
+        tl_pred = self.tl_decoder(embed)
+        junction_pred = self.junction_decoder(static_embed)
+        speed_pred = self.speed_decoder(dynamic_embed)
 
-    def forward(self, x):
+        return tl_pred, junction_pred, speed_pred
+
+    def actor_decode(self,
+                     dynamic_embed: Tensor,
+                     static_embed: Tensor,
+                     command: [List[RoadOption], RoadOption]
+                     ):
+        embed = torch.concat([dynamic_embed, static_embed], dim=-1)
+        if not isinstance(command, list):
+            command = [command] * len(dynamic_embed)
+        action_dist = self.actor(embed, command)
+
+        return action_dist
+
+    def critic_decode(self,
+                      dynamic_embed: Tensor,
+                      static_embed: Tensor,
+                      action: Tensor
+                      ):
+        embed = torch.concat([dynamic_embed, static_embed], dim=-1)
+        value = self.critic(embed, action)
+
+        return value
+
+    def forward(self, x: Tensor, command: List[RoadOption]):
         dynamic_embed, static_embed = self.encode(x)
-        embed = torch.concat([dynamic_embed, static_embed], dim=-1)
 
-        action_dist = self.action_decoder(embed)
-        action = action_dist.rsample()
-
-        return action
+        return self.actor_decode(dynamic_embed, static_embed, command)

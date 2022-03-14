@@ -23,20 +23,19 @@ BASE_EXPERIMENT_CONFIG = {
             #     "attribute_name1": attribute_value1,
             #     "attribute_name2": attribute_value2
             # }
-        },
-        "spawn_points": [
-            # "0,0,0,0,0,0",  # x,y,z,roll,pitch,yaw
-        ]
+        }
     },
     "background_activity": {
         "n_vehicles": 0,
         "n_walkers": 0,
-        "tm_hybrid_mode": True,
-        "seed": None
+        "tm_hybrid_mode": True
     },
-    "town": "Town05_Opt",
-    "weather": 'ClearNoon'
+    "weather": ["ClearNight", "ClearNoon", "ClearSunset", "CloudyNight", "CloudyNoon", "CloudySunset",
+                "Default", "HardRainNight", "HardRainNoon", "HardRainSunset", "MidRainSunset", "MidRainyNight",
+                "MidRainyNoon", "SoftRainNight", "SoftRainNoon", "SoftRainSunset", "WetCloudyNight",
+                "WetCloudyNoon", "WetCloudySunset", "WetNight", "WetNoon", "WetSunset"]
 }
+
 
 class BaseExperiment(object):
     def __init__(self, config):

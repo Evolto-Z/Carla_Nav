@@ -10,8 +10,12 @@ class MyExperiment(BaseExperiment):
         super().__init__(config)  # Creates a self.config with the experiment configuration
 
         self.allowed_types = [carla.LaneType.Driving, carla.LaneType.Parking]
+
         self.last_heading_deviation = 0
         self.last_action = None
+
+        self.last_location = None
+        self.last_velocity = 0
 
     def reset(self):
         """Called at the beginning and each time the simulation is reset"""
@@ -25,8 +29,8 @@ class MyExperiment(BaseExperiment):
     def get_action_space(self):
         return Dict({
             "throttle": Box(0, 1, (1,)),
-            "steer": Box(-1, 1, (1,)),
-            "brake": Box(0, 1, (1,))
+            "brake": Box(0, 1, (1,)),
+            "steer": Box(-1, 1, (1,))
         })
 
     def get_observation_space(self):
@@ -43,19 +47,6 @@ class MyExperiment(BaseExperiment):
         )
         return image_space
 
-    def compute_action(self, action):
-        """Given the action, returns a carla.VehicleControl() which will be applied to the hero"""
-        action = carla.VehicleControl()
-        action.throttle = action["throttle"]
-        action.steer = action["steer"]
-        action.brake = action["brake"]
-        action.reverse = False
-        action.hand_brake = False
-
-        self.last_action = action
-
-        return action
-
     def get_observation(self, sensor_data):
         """Function to do all the post processing of observations (sensor data).
 
@@ -66,7 +57,6 @@ class MyExperiment(BaseExperiment):
         The information variable can be empty
         """
         image = sensor_data["camera_rgb"][1]
-        # image = (image.astype(np.float32) - 128) / 128
 
         return image, {}
 
@@ -75,10 +65,16 @@ class MyExperiment(BaseExperiment):
         vel = hero.get_velocity()
         return 3.6 * math.sqrt(vel.x ** 2 + vel.y ** 2 + vel.z ** 2)
 
+    #################################
+    #  TODO: Improve this
+    #################################
     def get_done_status(self, observation, core):
         """Returns whether or not the experiment has to end"""
         return False
 
+    #################################
+    #  TODO: Improve this
+    #################################
     def compute_reward(self, observation, core):
         """Computes the reward"""
 

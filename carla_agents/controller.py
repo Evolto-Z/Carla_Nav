@@ -9,7 +9,7 @@ from collections import deque
 import math
 import numpy as np
 import carla
-from ..tools.misc import get_speed
+from tools.misc import get_speed
 
 
 class VehiclePIDController():
@@ -19,13 +19,15 @@ class VehiclePIDController():
     low level control a vehicle from client side
     """
 
-
-    def __init__(self, vehicle, args_lateral, args_longitudinal, offset=0, max_throttle=0.75, max_brake=0.3,
-                 max_steering=0.8):
+    def __init__(self,
+                 args_lateral,
+                 args_longitudinal,
+                 offset=0,
+                 max_throttle=0.75, max_brake=0.3, max_steering=0.8
+                 ):
         """
         Constructor method.
 
-        :param vehicle: actor to apply to local planner logic onto
         :param args_lateral: dictionary of arguments to set the lateral PID controller
         using the following semantics:
             K_P -- Proportional term
@@ -45,11 +47,22 @@ class VehiclePIDController():
         self.max_throt = max_throttle
         self.max_steer = max_steering
 
+        self._vehicle = None
+        self._world = None
+        self.past_steering = 0
+        self._lon_controller = PIDLongitudinalController(**args_longitudinal)
+        self._lat_controller = PIDLateralController(offset, **args_lateral)
+
+    def reset(self, vehicle):
         self._vehicle = vehicle
         self._world = self._vehicle.get_world()
         self.past_steering = self._vehicle.get_control().steer
-        self._lon_controller = PIDLongitudinalController(self._vehicle, **args_longitudinal)
-        self._lat_controller = PIDLateralController(self._vehicle, offset, **args_lateral)
+        self._lon_controller.reset(vehicle)
+        self._lat_controller.reset(vehicle)
+
+    def set_delta_time(self, dt):
+        self._lon_controller.dt = dt
+        self._lat_controller.dt = dt
 
     def run_step(self, target_speed, waypoint):
         """
@@ -66,14 +79,13 @@ class VehiclePIDController():
         current_steering = self._lat_controller.run_step(waypoint)
         control = carla.VehicleControl()
         if acceleration >= 0.0:
-            control.throttle = min(acceleration, self.max_throt)
+            control.throttle = min(acceleration.item(), self.max_throt)
             control.brake = 0.0
         else:
             control.throttle = 0.0
-            control.brake = min(abs(acceleration), self.max_brake)
+            control.brake = min(-acceleration.item(), self.max_brake)
 
         # Steering regulation: changes cannot happen abruptly, can't steer too much.
-
         if current_steering > self.past_steering + 0.1:
             current_steering = self.past_steering + 0.1
         elif current_steering < self.past_steering - 0.1:
@@ -91,7 +103,6 @@ class VehiclePIDController():
 
         return control
 
-
     def change_longitudinal_PID(self, args_longitudinal):
         """Changes the parameters of the PIDLongitudinalController"""
         self._lon_controller.change_parameters(**args_longitudinal)
@@ -101,27 +112,29 @@ class VehiclePIDController():
         self._lon_controller.change_parameters(**args_lateral)
 
 
-class PIDLongitudinalController():
+class PIDLongitudinalController:
     """
     PIDLongitudinalController implements longitudinal control using a PID.
     """
 
-    def __init__(self, vehicle, K_P=1.0, K_I=0.0, K_D=0.0, dt=0.03):
+    def __init__(self, K_P=1.0, K_I=0.0, K_D=0.0):
         """
         Constructor method.
 
-            :param vehicle: actor to apply to local planner logic onto
             :param K_P: Proportional term
             :param K_D: Differential term
             :param K_I: Integral term
-            :param dt: time differential in seconds
         """
-        self._vehicle = vehicle
+        self._vehicle = None
         self._k_p = K_P
         self._k_i = K_I
         self._k_d = K_D
-        self._dt = dt
+        self.dt = 0
         self._error_buffer = deque(maxlen=10)
+
+    def reset(self, vehicle):
+        self._vehicle = vehicle
+        self._error_buffer.clear()
 
     def run_step(self, target_speed, debug=False):
         """
@@ -151,46 +164,47 @@ class PIDLongitudinalController():
         self._error_buffer.append(error)
 
         if len(self._error_buffer) >= 2:
-            _de = (self._error_buffer[-1] - self._error_buffer[-2]) / self._dt
-            _ie = sum(self._error_buffer) * self._dt
+            _de = (self._error_buffer[-1] - self._error_buffer[-2]) / self.dt
+            _ie = sum(self._error_buffer) * self.dt
         else:
             _de = 0.0
             _ie = 0.0
 
         return np.clip((self._k_p * error) + (self._k_d * _de) + (self._k_i * _ie), -1.0, 1.0)
 
-    def change_parameters(self, K_P, K_I, K_D, dt):
+    def change_parameters(self, K_P, K_I, K_D):
         """Changes the PID parameters"""
         self._k_p = K_P
         self._k_i = K_I
         self._k_d = K_D
-        self._dt = dt
 
 
-class PIDLateralController():
+class PIDLateralController:
     """
     PIDLateralController implements lateral control using a PID.
     """
 
-    def __init__(self, vehicle, offset=0, K_P=1.0, K_I=0.0, K_D=0.0, dt=0.03):
+    def __init__(self, offset=0, K_P=1.0, K_I=0.0, K_D=0.0):
         """
         Constructor method.
 
-            :param vehicle: actor to apply to local planner logic onto
             :param offset: distance to the center line. If might cause issues if the value
                 is large enough to make the vehicle invade other lanes.
             :param K_P: Proportional term
             :param K_D: Differential term
             :param K_I: Integral term
-            :param dt: time differential in seconds
         """
-        self._vehicle = vehicle
+        self._vehicle = None
         self._k_p = K_P
         self._k_i = K_I
         self._k_d = K_D
-        self._dt = dt
+        self.dt = 0
         self._offset = offset
         self._e_buffer = deque(maxlen=10)
+
+    def reset(self, vehicle):
+        self._vehicle = vehicle
+        self._e_buffer.clear()
 
     def run_step(self, waypoint):
         """
@@ -242,17 +256,16 @@ class PIDLateralController():
 
         self._e_buffer.append(_dot)
         if len(self._e_buffer) >= 2:
-            _de = (self._e_buffer[-1] - self._e_buffer[-2]) / self._dt
-            _ie = sum(self._e_buffer) * self._dt
+            _de = (self._e_buffer[-1] - self._e_buffer[-2]) / self.dt
+            _ie = sum(self._e_buffer) * self.dt
         else:
             _de = 0.0
             _ie = 0.0
 
         return np.clip((self._k_p * _dot) + (self._k_d * _de) + (self._k_i * _ie), -1.0, 1.0)
 
-    def change_parameters(self, K_P, K_I, K_D, dt):
+    def change_parameters(self, K_P, K_I, K_D):
         """Changes the PID parameters"""
         self._k_p = K_P
         self._k_i = K_I
         self._k_d = K_D
-        self._dt = dt

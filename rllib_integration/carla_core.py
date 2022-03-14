@@ -13,6 +13,7 @@ import subprocess
 import time
 import psutil
 import logging
+import platform
 
 import carla
 
@@ -22,27 +23,33 @@ from rllib_integration.helper import join_dicts
 
 BASE_CORE_CONFIG = {
     "host": "localhost",  # Client host
+    "port": 2000,
     "timeout": 10.0,  # Timeout of the client
     "timestep": 0.05,  # Time step of the simulation
     "retries_on_error": 10,  # Number of tries to connect to the client
     "resolution_x": 600,  # Width of the server spectator camera
     "resolution_y": 600,  # Height of the server spectator camera
     "quality_level": "Low",  # Quality level of the simulation. Can be 'Low', 'High', 'Epic'
-    "enable_map_assets": False,  # enable / disable all town assets except for the road
-    "enable_rendering": True,  # enable / disable camera images
-    "show_display": False  # Whether or not the server will be displayed
+    "enable_map_assets": True,  # enable / disable all town assets except for the road
+    "enable_rendering": True  # enable / disable camera images
 }
+
+SYSTEM = platform.system()
 
 
 def is_used(port):
     """Checks whether or not a port is used"""
     return port in [conn.laddr.port for conn in psutil.net_connections()]
 
+
 def kill_all_servers():
     """Kill all PIDs that start with Carla"""
     processes = [p for p in psutil.process_iter() if "carla" in p.name().lower()]
     for process in processes:
-        os.kill(process.pid, signal.SIGKILL)
+        if SYSTEM == "Windows":
+            os.kill(process.pid, signal.SIGINT)
+        else:
+            os.kill(process.pid, signal.SIGKILL)
 
 
 class CarlaCore:
@@ -50,73 +57,78 @@ class CarlaCore:
     Class responsible of handling all the different CARLA functionalities, such as server-client connecting,
     actor spawning and getting the sensors data.
     """
-    def __init__(self, config={}):
+    def __init__(self, config={}, seed=None):
         """Initialize the server and client"""
+
+        self.config = join_dicts(BASE_CORE_CONFIG, config)
+        self.seed = seed
+        random.seed(seed)
+
         self.client = None
+        self.traffic_manager = None
         self.world = None
         self.map = None
         self.hero = None
-        self.config = join_dicts(BASE_CORE_CONFIG, config)
+
+        self.host = self.config["host"]
+        self.server_port = self.config["port"]
+        while is_used(self.server_port):
+            self.server_port += 1
+        self.tm_port = self.server_port + 1
+        while is_used(self.tm_port):
+            self.tm_port += 1
+
+        self.available_maps = []
+        self.available_weathers = []
+
+        self.n_vehicles = 0
+        self.n_walkers = 0
+        self.tm_hybrid_mode = True
+        self.tm_actors = []
+        self.tm_controllers = []
+
+        self.hero_blueprint = None
+        self.sensors_dict = {}
         self.sensor_interface = SensorInterface()
 
         self.init_server()
         self.connect_client()
 
     def init_server(self):
-        """Start a server on a random port"""
-        self.server_port = random.randint(15000, 32000)
-
-        # Ray tends to start all processes simultaneously. Use random delays to avoid problems
-        time.sleep(random.uniform(0, 1))
-
-        uses_server_port = is_used(self.server_port)
-        uses_stream_port = is_used(self.server_port + 1)
-        while uses_server_port and uses_stream_port:
-            if uses_server_port:
-                print("Is using the server port: " + self.server_port)
-            if uses_stream_port:
-                print("Is using the streaming port: " + str(self.server_port+1))
-            self.server_port += 2
-            uses_server_port = is_used(self.server_port)
-            uses_stream_port = is_used(self.server_port+1)
-
-        if self.config["show_display"]:
-            server_command = [
-                "{}/CarlaUE4.exe".format(os.environ["CARLA_ROOT"]),
-                "-windowed",
-                "-ResX={}".format(self.config["resolution_x"]),
-                "-ResY={}".format(self.config["resolution_y"]),
-            ]
-        else:
-            server_command = [
-                "DISPLAY= ",
-                "{}/CarlaUE4.exe".format(os.environ["CARLA_ROOT"]),
-                "-opengl"  # no-display isn't supported for Unreal 4.24 with vulkan
-            ]
-
-        server_command += [
+        server_command = [
+            "{}/CarlaUE4.exe".format(os.environ["CARLA_ROOT"]),
+            "-windowed",
+            "-ResX={}".format(self.config["resolution_x"]),
+            "-ResY={}".format(self.config["resolution_y"]),
             "--carla-rpc-port={}".format(self.server_port),
             "-quality-level={}".format(self.config["quality_level"])
         ]
-
         server_command_text = " ".join(map(str, server_command))
         print(server_command_text)
-        server_process = subprocess.Popen(
-            server_command_text,
-            shell=True,
-            # preexec_fn=os.setsid,
-            stdout=open(os.devnull, "w"),
-        )
+
+        if SYSTEM == "Windows":
+            subprocess.Popen(
+                server_command_text,
+                shell=True,
+                stdout=open(os.devnull, "w"),
+            )
+        else:
+            subprocess.Popen(
+                server_command_text,
+                shell=True,
+                preexec_fn=os.setsid,
+                stdout=open(os.devnull, "w"),
+            )
 
     def connect_client(self):
         """Connect to the client"""
 
         for i in range(self.config["retries_on_error"]):
             try:
-                self.client = carla.Client(self.config["host"], self.server_port)
+                self.client = carla.Client(self.host, self.server_port)
                 self.client.set_timeout(self.config["timeout"])
-                self.world = self.client.get_world()
 
+                self.world = self.client.get_world()
                 settings = self.world.get_settings()
                 settings.no_rendering_mode = not self.config["enable_rendering"]
                 settings.synchronous_mode = True
@@ -124,123 +136,101 @@ class CarlaCore:
                 self.world.apply_settings(settings)
                 self.world.tick()
 
-                return
+                return  # pushed to the call stack, not return immediately
 
             except Exception as e:
-                print(" Waiting for server to be ready: {}, attempt {} of {}".format(e, i + 1, self.config["retries_on_error"]))
+                print(" Waiting for server to be ready: {}, attempt {} of {}".format(
+                    e, i + 1, self.config["retries_on_error"]))
                 time.sleep(3)
 
-        raise Exception("Cannot connect to server. Try increasing 'timeout' or 'retries_on_error' at the carla configuration")
+        raise Exception("Cannot connect to server. "
+                        "Try increasing 'timeout' or 'retries_on_error' at the carla configuration")
 
-    def setup_experiment(self, experiment_config):
-        """Initialize the hero and sensors"""
+    def setup(self, experiment_config):
+        # Get available maps and weathers
+        self.available_maps = self.client.get_available_maps()
+        self.available_weathers = experiment_config["weather"]
+        if not isinstance(self.available_weathers, list):
+            self.available_weathers = [self.available_weathers]
 
+        # Get parameters of the traffic manager
+        self.n_vehicles = experiment_config["background_activity"]["n_vehicles"]
+        self.n_walkers = experiment_config["background_activity"]["n_walkers"]
+        self.tm_hybrid_mode = experiment_config["background_activity"]["tm_hybrid_mode"]
+
+        # Get parameters of the hero
+        hero_config = experiment_config["hero"]
+        self.hero_blueprint = self.world.get_blueprint_library().find(hero_config['blueprint'])
+        self.hero_blueprint.set_attribute("role_name", "hero")
+        self.sensors_dict = hero_config["sensors"]
+
+    def reset(self):
+        # Manually clean, or there will be errors
+        self.sensor_interface.destroy()
+        for controller in self.tm_controllers:
+            controller.stop()
+        for actor in self.tm_actors:
+            actor.destroy()
+        self.world.tick()
+
+        # Load the world and get the map
+        map_name = random.choice(self.available_maps)
+        print("Map Name: {}".format(map_name))
         self.world = self.client.load_world(
-            map_name = experiment_config["town"],
-            reset_settings = False,
-            map_layers = carla.MapLayer.All if self.config["enable_map_assets"] else carla.MapLayer.NONE)
-
+            map_name=map_name,
+            reset_settings=False)
+        self.world.tick()  # When changing to a new world, we should get the map after a tick.
         self.map = self.world.get_map()
 
         # Choose the weather of the simulation
-        weather = getattr(carla.WeatherParameters, experiment_config["weather"])
-        self.world.set_weather(weather)
+        weather = self.available_weathers
+        if isinstance(weather, list):
+            weather = random.choice(weather)
+        print("Weather: {}".format(weather))
+        weather_param = getattr(carla.WeatherParameters, weather)
+        self.world.set_weather(weather_param)
 
-        self.tm_port = self.server_port // 10 + self.server_port % 10
-        while is_used(self.tm_port):
-            print("Traffic manager's port " + str(self.tm_port) + " is already being used. Checking the next one")
-            self.tm_port += 1
-        print("Traffic manager connected to port " + str(self.tm_port))
-
+        # Set up the traffic manager
         self.traffic_manager = self.client.get_trafficmanager(self.tm_port)
-        self.traffic_manager.set_hybrid_physics_mode(experiment_config["background_activity"]["tm_hybrid_mode"])
-        seed = experiment_config["background_activity"]["seed"]
-        if seed is not None:
-            self.traffic_manager.set_random_device_seed(seed)
+        print("Traffic manager connected to port " + str(self.tm_port))
+        self.traffic_manager.set_hybrid_physics_mode(self.tm_hybrid_mode)
+        if self.seed is not None:
+            self.traffic_manager.set_random_device_seed(self.seed)
 
         # Spawn the background activity
-        self.spawn_npcs(
-            experiment_config["background_activity"]["n_vehicles"],
-            experiment_config["background_activity"]["n_walkers"],
-        )
+        n_vehicles = self.n_vehicles
+        if isinstance(n_vehicles, list):
+            n_vehicles = random.randint(*n_vehicles)
+        n_walkers = self.n_walkers
+        if isinstance(n_walkers, list):
+            n_walkers = random.randint(*n_walkers)
+        print("Spawn {} vehicle(s) and {} walker(s).".format(n_vehicles, n_walkers))
+        self.spawn_npcs(n_vehicles, n_walkers)
 
-
-    def reset_hero(self, hero_config):
-        """This function resets / spawns the hero vehicle and its sensors"""
-
-        # Part 1: destroy all sensors (if necessary)
-        self.sensor_interface.destroy()
-
-        self.world.tick()
-
-        # Part 2: Spawn the ego vehicle
-        user_spawn_points = hero_config["spawn_points"]
-        if user_spawn_points:
-            spawn_points = []
-            for transform in user_spawn_points:
-
-                transform = [float(x) for x in transform.split(",")]
-                if len(transform) == 3:
-                    location = carla.Location(
-                        transform[0], transform[1], transform[2]
-                    )
-                    waypoint = self.map.get_waypoint(location)
-                    waypoint = waypoint.previous(random.uniform(0, 5))[0]
-                    transform = carla.Transform(
-                        location, waypoint.transform.rotation
-                    )
-                else:
-                    assert len(transform) == 6
-                    transform = carla.Transform(
-                        carla.Location(transform[0], transform[1], transform[2]),
-                        carla.Rotation(transform[4], transform[5], transform[3])
-                    )
-                spawn_points.append(transform)
-        else:
-            spawn_points = self.map.get_spawn_points()
-
-        self.hero_blueprints = self.world.get_blueprint_library().find(hero_config['blueprint'])
-        self.hero_blueprints.set_attribute("role_name", "hero")
-
-        # If already spawned, destroy it
-        if self.hero is not None:
-            self.hero.destroy()
-            self.hero = None
-
+        # Spawn the ego vehicle
+        spawn_points = self.map.get_spawn_points()
         random.shuffle(spawn_points, random.random)
-        for i in range(0,len(spawn_points)):
+        for i in range(len(spawn_points)):
             next_spawn_point = spawn_points[i % len(spawn_points)]
-            self.hero = self.world.try_spawn_actor(self.hero_blueprints, next_spawn_point)
+            self.hero = self.world.try_spawn_actor(self.hero_blueprint, next_spawn_point)
             if self.hero is not None:
                 print("Hero spawned!")
                 break
-            else:
-                print("Could not spawn hero, changing spawn point")
+        assert self.hero is not None
 
-        if self.hero is None:
-            print("We ran out of spawn points")
-            return
-
-        self.world.tick()
-
-        # Part 3: Spawn the new sensors
-        for name, attributes in hero_config["sensors"].items():
-            sensor = SensorFactory.spawn(name, attributes, self.sensor_interface, self.hero)
-
-        # Not needed anymore. This tick will happen when calling CarlaCore.tick()
-        # self.world.tick()
-
-        return self.hero
+        # Spawn the new sensors
+        for name, attributes in self.sensors_dict.items():
+            SensorFactory.spawn(name, attributes, self.sensor_interface, self.hero)
 
     def spawn_npcs(self, n_vehicles, n_walkers):
         """Spawns vehicles and walkers, also setting up the Traffic Manager and its parameters"""
-
-
         SpawnActor = carla.command.SpawnActor
         SetAutopilot = carla.command.SetAutopilot
         FutureActor = carla.command.FutureActor
 
+        # --------------
         # Spawn vehicles
+        # --------------
         spawn_points = self.world.get_map().get_spawn_points()
         n_spawn_points = len(spawn_points)
 
@@ -261,9 +251,11 @@ class CarlaCore:
             if v_blueprint.has_attribute('color'):
                 color = random.choice(v_blueprint.get_attribute('color').recommended_values)
                 v_blueprint.set_attribute('color', color)
+            if v_blueprint.has_attribute('driver_id'):
+                driver_id = random.choice(v_blueprint.get_attribute('driver_id').recommended_values)
+                v_blueprint.set_attribute('driver_id', driver_id)
             v_blueprint.set_attribute('role_name', 'autopilot')
 
-            transform.location.z += 1
             v_batch.append(SpawnActor(v_blueprint, transform)
                            .then(SetAutopilot(FutureActor, True, self.tm_port)))
 
@@ -273,7 +265,14 @@ class CarlaCore:
                             .format(n_vehicles, len(results)))
         vehicles_id_list = [r.actor_id for r in results if not r.error]
 
-        # Spawn the walkers
+        # Set automatic vehicle lights update
+        all_vehicle_actors = self.world.get_actors(vehicles_id_list)
+        for actor in all_vehicle_actors:
+            self.traffic_manager.update_vehicle_lights(actor, True)
+
+        # -------------
+        # Spawn Walkers
+        # -------------
         spawn_locations = [self.world.get_random_location_from_navigation() for i in range(n_walkers)]
 
         w_batch = []
@@ -311,7 +310,8 @@ class CarlaCore:
             controller.go_to_location(self.world.get_random_location_from_navigation())
 
         self.world.tick()
-        self.actors = self.world.get_actors(vehicles_id_list + walkers_id_list + controllers_id_list)
+        self.tm_actors = self.world.get_actors(vehicles_id_list + walkers_id_list)
+        self.tm_controllers = self.world.get_actors(controllers_id_list)
 
     def tick(self, control):
         """Performs one tick of the simulation, moving all actors, and getting the sensor data"""
@@ -345,8 +345,8 @@ class CarlaCore:
         server_view_pitch = transform.rotation.pitch
 
         # Get the spectator and place it on the desired position
-        self.spectator = self.world.get_spectator()
-        self.spectator.set_transform(
+        spectator = self.world.get_spectator()
+        spectator.set_transform(
             carla.Transform(
                 carla.Location(x=server_view_x, y=server_view_y, z=server_view_z),
                 carla.Rotation(pitch=server_view_pitch,yaw=server_view_yaw,roll=server_view_roll),
