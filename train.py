@@ -10,6 +10,7 @@ from algorithm.policy import MyPolicy
 from experiment import MyExperiment
 from algorithm.trainer import MyTrainer
 from tools.misc import compute_action
+from tools.displayer import DisplayManager
 
 import yaml
 import random
@@ -32,6 +33,9 @@ def run(args):
         policy = MyPolicy(config["policy_config"])
         trainer = MyTrainer(policy.get_model(), config["trainer_config"])
 
+        displayer = None
+        handle = None
+
         start_il_epoch = -1
         start_rl_epoch = -1
         if args.restore:
@@ -46,6 +50,9 @@ def run(args):
         batch_size = config["il_batch_size"]
         for i in range(start_il_epoch + 1, total_epoch):
             obs = env.reset()
+            if displayer is None:
+                displayer = DisplayManager((obs.shape[1], obs.shape[0]))
+                handle = displayer.launch()
             done = False
             guider.reset(env.hero)
             policy.reset(env.hero)
@@ -57,6 +64,8 @@ def run(args):
             guider.set_destination(destination)
 
             while not done:
+                displayer.render(obs)
+                displayer.step()
                 command = guider.get_target_road_option()
                 control = guider.run_step(debug=debug)
                 action = compute_action(control)

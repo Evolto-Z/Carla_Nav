@@ -8,6 +8,7 @@
 
 import queue
 
+
 class SensorInterface(object):
     """
     Class used to handle all the sensor data management

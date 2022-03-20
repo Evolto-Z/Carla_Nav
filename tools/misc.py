@@ -12,6 +12,7 @@ from enum import Enum
 import math
 import numpy as np
 import carla
+import threading
 
 
 class RoadOption(Enum):
@@ -196,3 +197,11 @@ def compute_action(control: carla.VehicleControl):
         acceleration = control.throttle
     steering = control.steer
     return acceleration, steering
+
+
+def thread_decorator(func):
+    def wrapper(*args, **kwargs):
+        thread = threading.Thread(target=func, args=args, kwargs=kwargs)
+        thread.start()
+        return thread
+    return wrapper
