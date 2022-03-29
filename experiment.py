@@ -1,4 +1,5 @@
 from rllib_integration.base_experiment import BaseExperiment
+from tools.misc import get_speed, compute_action
 
 import carla
 from gym.spaces import Box, Dict
@@ -19,8 +20,6 @@ class MyExperiment(BaseExperiment):
         self.last_velocity = 0
 
     def reset(self):
-        """Called at the beginning and each time the simulation is reset"""
-
         # hero variables
         self.last_location = None
         self.last_velocity = 0
@@ -35,50 +34,49 @@ class MyExperiment(BaseExperiment):
         })
 
     def get_observation_space(self):
-        num_of_channels = 3
-        image_space = Box(
-            low=0.0,
-            high=255.0,
-            shape=(
-                self.config["hero"]["sensors"]["camera_rgb"]["image_size_y"],
-                self.config["hero"]["sensors"]["camera_rgb"]["image_size_x"],
-                num_of_channels
+        return Dict({
+            "cameraRGB": Box(
+                low=0.0,
+                high=255.0,
+                shape=(
+                    self.config["hero"]["sensors"]["camera_rgb"]["image_size_y"],
+                    self.config["hero"]["sensors"]["camera_rgb"]["image_size_x"],
+                    3
+                ),
+                dtype=np.uint8,
             ),
-            dtype=np.uint8,
-        )
-        return image_space
+            "speed": Box(0, 70, (1,)),
+            "acceleration": Box(-1, 1, (1,)),
+            "current_steering": Box(-1, 1, (1,))
+        })
 
-    def get_observation(self, sensor_data):
-        """Function to do all the post processing of observations (sensor data).
-
-        :param sensor_data: dictionary {sensor_name: sensor_data}
-
-        Should return a tuple or list with two items, the processed observations,
-        as well as a variable with additional information about such observation.
-        The information variable can be empty
-        """
+    def get_observation(self, sensor_data, hero: carla.Vehicle):
         image = sensor_data["camera_rgb"][1]
 
-        return image, {}
+        speed = get_speed(hero)
+        acceleration, current_steering = compute_action(hero.get_control())
 
-    def get_speed(self, hero):
-        """Computes the speed of the hero vehicle in Km/h"""
-        vel = hero.get_velocity()
-        return 3.6 * math.sqrt(vel.x ** 2 + vel.y ** 2 + vel.z ** 2)
+        obs = {
+            "cameraRGB": image,
+            "speed": speed,
+            "acceleration": acceleration,
+            "current_steering": current_steering
+        }
+
+        info = {}
+
+        return obs, info
 
     #################################
     #  TODO: Improve this
     #################################
     def get_done_status(self, observation, core):
-        """Returns whether or not the experiment has to end"""
         return False
 
     #################################
     #  TODO: Improve this
     #################################
     def compute_reward(self, observation, core):
-        """Computes the reward"""
-
         def unit_vector(vector):
             return vector / np.linalg.norm(vector)
 
@@ -99,7 +97,7 @@ class MyExperiment(BaseExperiment):
 
         # Hero-related variables
         hero_location = hero.get_location()
-        hero_velocity = self.get_speed(hero)
+        hero_velocity = get_speed(hero)
         hero_heading = hero.get_transform().get_forward_vector()
         hero_heading = [hero_heading.x, hero_heading.y]
 

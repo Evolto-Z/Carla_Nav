@@ -187,7 +187,7 @@ class BasicAgent(object):
             If None, the base threshold value is used
         """
         if self._ignore_traffic_lights:
-            return False, None
+            return None
 
         if not lights_list:
             lights_list = self._world.get_actors().filter("*traffic_light*")
@@ -211,14 +211,10 @@ class BasicAgent(object):
             if dot_ve_wp < 0:
                 continue
 
-            state = traffic_light.state
-            if state == carla.TrafficLightState.Off or state == carla.TrafficLightState.Unknown:
-                continue
-
             if is_within_distance(object_waypoint.transform, self._vehicle.get_transform(), max_distance, [0, 90]):
-                return True, state
+                return traffic_light.state
 
-        return False, None
+        return None
 
     def _vehicle_obstacle_detected(self,
                                    vehicle_list=None,

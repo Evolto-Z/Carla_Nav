@@ -66,10 +66,10 @@ trainer_config:
   lr_rl_critic: 0.001
 
 
-total_il_epoch: 3
-total_rl_epoch: 128
+total_il_epoch: 128
+total_rl_epoch: 256
 il_batch_size: 1
 il_horizon: 32
-rl_batch_size: 16
-debug: True
+rl_batch_size: 32
+debug: False
 seed: null

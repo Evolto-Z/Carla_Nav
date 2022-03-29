@@ -12,11 +12,12 @@ from __future__ import print_function
 import gym
 
 from rllib_integration.carla_core import CarlaCore
+from tools.displayer import DisplayManager
 
 
 class CarlaEnv(gym.Env):
     """
-    This is a carla environment, responsible of handling all the CARLA related steps of the training.
+    This is a carla environment, responsible for handling all the CARLA related steps of the training.
     """
 
     def __init__(self, config, seed=None):
@@ -33,6 +34,10 @@ class CarlaEnv(gym.Env):
 
         self.hero = None
 
+        image_shape = self.observation_space["cameraRGB"].shape
+        self.displayer = DisplayManager((image_shape[1], image_shape[0]))
+        self.render_cache = None
+
     def reset(self):
         self.experiment.reset()
         self.core.reset()
@@ -40,17 +45,26 @@ class CarlaEnv(gym.Env):
 
         # Tick once and get the observations
         sensor_data = self.core.tick(None)
-        observation, _ = self.experiment.get_observation(sensor_data)
+        obs, _ = self.experiment.get_observation(sensor_data, self.hero)
 
-        return observation
+        self.render_cache = obs["cameraRGB"]
+
+        return obs
 
     def step(self, control):
         """Computes one tick of the environment in order to return the new observation,
         as well as the rewards"""
+        self.displayer.step()
+
         sensor_data = self.core.tick(control)
 
-        observation, info = self.experiment.get_observation(sensor_data)
-        done = self.experiment.get_done_status(observation, self.core)
-        reward = self.experiment.compute_reward(observation, self.core)
+        obs, info = self.experiment.get_observation(sensor_data, self.hero)
+        done = self.experiment.get_done_status(obs, self.core)
+        reward = self.experiment.compute_reward(obs, self.core)
 
-        return observation, reward, done, info
+        self.render_cache = obs["cameraRGB"]
+
+        return obs, reward, done, info
+
+    def render(self, mode="human"):
+        self.displayer.render(self.render_cache)

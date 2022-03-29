@@ -44,7 +44,7 @@ def draw_waypoints(world, waypoints, z=0.5):
         world.debug.draw_arrow(begin, end, arrow_size=0.3, life_time=1.0)
 
 
-def get_speed(vehicle):
+def get_speed(vehicle: carla.Vehicle):
     """
     Compute speed of a vehicle in Km/h.
 
@@ -117,7 +117,7 @@ def is_within_distance(target_transform, reference_transform, max_distance, angl
     forward_vector = np.array([fwd.x, fwd.y])
     angle = math.degrees(math.acos(np.clip(np.dot(forward_vector, target_vector) / norm_target, -1., 1.)))
 
-    return min_angle < angle < max_angle
+    return min_angle <= angle <= max_angle
 
 
 def compute_magnitude_angle(target_location, current_location, orientation):
@@ -191,6 +191,11 @@ def positive(num):
 
 
 def compute_action(control: carla.VehicleControl):
+    """
+    Convert control to action.
+    :param control: carla.VehicleControl
+    :return:
+    """
     if control.brake == 0.0:
         acceleration = -control.brake
     else:

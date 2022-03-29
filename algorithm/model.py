@@ -5,14 +5,16 @@ from torch.nn import functional as F
 from torch import distributions as td
 from torchvision import models
 from algorithm.nn_modules import TanhBijector
-from typing import Any, List, Tuple
+from typing import Any, List, Tuple, Union
 from torch import Tensor
 from tools.misc import RoadOption
+from numpy import ndarray
 
 ActFunc = Any
 DYNAMIC_EMBED_SIZE = 2048
 STATIC_EMBED_SIZE = 6144
 EMBED_SIZE = DYNAMIC_EMBED_SIZE + STATIC_EMBED_SIZE
+NUM_HEAD = 6
 
 
 class ConvEncoder(nn.Module):
@@ -82,11 +84,11 @@ class ConvEncoder(nn.Module):
 
 class TrafficLightDecoder(nn.Module):
     def __init__(self,
-                 input_size: int = EMBED_SIZE,
+                 embed_size: int = EMBED_SIZE,
                  hidden_size: int = 256):
         super().__init__()
 
-        self.fc = nn.Linear(input_size, hidden_size)
+        self.fc = nn.Linear(embed_size, hidden_size)
         self.affected_head = nn.Linear(
             hidden_size, 1
         )  # Classification: affected or not
@@ -104,12 +106,12 @@ class TrafficLightDecoder(nn.Module):
 
 class JunctionDecoder(nn.Module):
     def __init__(self,
-                 input_size: int = STATIC_EMBED_SIZE,
+                 embed_size: int = STATIC_EMBED_SIZE,
                  hidden_size: int = 256,
                  ):
         super().__init__()
 
-        self.fc = nn.Linear(input_size, hidden_size)
+        self.fc = nn.Linear(embed_size, hidden_size)
         self.presence_head = nn.Linear(
             hidden_size, 1
         )  # Classification present or not
@@ -123,12 +125,12 @@ class JunctionDecoder(nn.Module):
 
 class SpeedDecoder(nn.Module):
     def __init__(self,
-                 input_size: int = DYNAMIC_EMBED_SIZE,
+                 embed_size: int = DYNAMIC_EMBED_SIZE,
                  hidden_size: int = 256,
                  ):
         super().__init__()
 
-        self.fc = nn.Linear(input_size, hidden_size)
+        self.fc = nn.Linear(embed_size, hidden_size)
         self.speed_head = nn.Linear(
             hidden_size, 1
         )  # km/h
@@ -140,29 +142,6 @@ class SpeedDecoder(nn.Module):
         return speed
 
 
-# class LaneDecoder(nn.Module):
-#     def __init__(self,
-#                  input_size: int = EMBED_SIZE,
-#                  hidden_size: int = 256
-#                  ):
-#         super().__init__()
-#
-#         self.fc = nn.Linear(input_size, hidden_size)
-#         self.offset_head = nn.Linear(
-#             hidden_size, 1
-#         )  # Classification: has offset or not.
-#         self.yaw_head = nn.Linear(
-#             hidden_size, 1
-#         )  # Classification: has yaw or not.
-#
-#     def forward(self, x):
-#         x = F.elu(self.fc(x))
-#         offset = self.offset_head(x).squeeze(dim=-1)
-#         yaw = self.yaw_head(x).squeeze(dim=-1)
-#
-#         return offset, yaw
-
-
 class ActionDecoder(nn.Module):
     """
     It outputs a distribution parameterized by mean and std, later to be
@@ -171,7 +150,8 @@ class ActionDecoder(nn.Module):
 
     def __init__(self,
                  action_size: int,
-                 input_size: int = EMBED_SIZE,
+                 embed_size: int = EMBED_SIZE,
+                 ego_state_size: int = 3,
                  units: Tuple[int] = (1024, 256),
                  num_head: int = 6,
                  act: ActFunc = None,
@@ -183,16 +163,15 @@ class ActionDecoder(nn.Module):
 
         Args:
             action_size (int): Action space size
-            input_size (int): Input size to network
+            embed_size (int): Embed size of the embedded vector
+            ego_state_size (int): Ego state size
             units (Tuple[int,]): Size of the hidden layers
             act (Any): Activation function
             min_std (float): Minimum std for output distribution
-            init_std (float): Intitial std
+            init_std (float): Initial std
             mean_scale (float): Augmenting mean output from FC network
         """
         super().__init__()
-        self.units = units
-        self.num_head = num_head
         self.act = act
         if not act:
             self.act = nn.ReLU
@@ -202,17 +181,18 @@ class ActionDecoder(nn.Module):
         self.action_size = action_size
 
         self.heads = []
-        self.softplus = nn.Softplus()
+        self.softPlus = nn.Softplus()
 
         # MLP Construction
         self.fc = nn.Sequential(
-            nn.Linear(input_size, self.units[0]),
+            nn.Linear(embed_size, units[0]),
             self.act()
         )
+
         for _ in range(num_head):
             layers = []
-            cur_size = self.units[0]
-            for unit in self.units[1:]:
+            cur_size = units[0] + ego_state_size
+            for unit in units[1:]:
                 layers.extend([nn.Linear(cur_size, unit), self.act()])
                 cur_size = unit
             layers.append(nn.Linear(cur_size, 2 * action_size))
@@ -220,16 +200,31 @@ class ActionDecoder(nn.Module):
             self.heads.append(head)
 
     # Returns distribution
-    def forward(self, x: Tensor, command: List[RoadOption]):
+    def forward(self,
+                x: Tensor,
+                command: Union[ndarray, RoadOption],
+                ego_state: Tensor
+                ):
         x = self.fc(x)
-        x = torch.split(x, 1, dim=0)
-        x = list(map(lambda item: self.heads[item[0].value - 1](item[1]), zip(command, x)))
-        x = torch.concat(x, dim=0)
+
+        x = torch.concat([x, ego_state], dim=-1)
+        if isinstance(command, RoadOption):
+            x = self.heads[command.value - 1](x)
+        else:
+            orig_shape = x.shape
+            x = x.view(-1, orig_shape[-1])
+            command = command.flatten()
+            indices = list(map(lambda item: item.value - 1, command))
+            x = torch.split(x, 1, dim=0)
+            x = list(map(lambda item: self.heads[item[0]](item[1]), zip(indices, x)))
+            x = torch.concat(x, dim=0)
+            x = x.view(*orig_shape[:-1], -1)
 
         mean, std = torch.chunk(x, 2, dim=-1)
         mean = self.mean_scale * torch.tanh(mean / self.mean_scale)
         raw_init_std = np.log(np.exp(self.init_std) - 1)
-        std = self.softplus(std + raw_init_std) + self.min_std
+        std = self.softPlus(std + raw_init_std) + self.min_std
+
         dist = td.Normal(mean, std)
         transforms = [TanhBijector()]
         dist = td.transformed_distribution.TransformedDistribution(dist, transforms)
@@ -244,45 +239,47 @@ class ValueDecoder(nn.Module):
     """
 
     def __init__(self,
+                 embed_size: int = EMBED_SIZE,
                  action_size: int = 2,
-                 input_size: int = EMBED_SIZE,
+                 ego_state_size: int = 3,
                  units: Tuple[int] = (1024, 256),
                  act: ActFunc = None
                  ):
         """Initializes Policy
 
         Args:
-            input_size (int): Input size to network
+            embed_size (int): Embed size of the embedded vector
+            action_size (int): Action space size
+            ego_state_size (int): Ego state size
             units (Tuple[int,]): Size of the hidden layers
             act (Any): Activation function
         """
         super().__init__()
-        self.units = units
         self.act = act
         if not act:
             self.act = nn.ELU
 
-        self.softplus = nn.Softplus()
-
         # MLP Construction
         self.fc = nn.Sequential(
-            nn.Linear(input_size, self.units[0]),
+            nn.Linear(embed_size, units[0]),
             self.act()
         )
-        self.layers = []
-        cur_size = self.units[0] + action_size
-        for unit in self.units[1:]:
-            self.layers.extend([nn.Linear(cur_size, unit), self.act()])
+
+        layers = []
+        cur_size = units[0] + action_size + ego_state_size
+        for unit in units[1:]:
+            layers.extend([nn.Linear(cur_size, unit), self.act()])
             cur_size = unit
+        layers.append(nn.Linear(cur_size, 1))
 
-        self.layers.append(nn.Linear(cur_size, 1))
-
-        self.model = nn.Sequential(*self.layers)
+        self.model = nn.Sequential(*layers)
 
     # Returns distribution
-    def forward(self, x: Tensor, action: Tensor):
+    def forward(self, x: Tensor, action: Tensor, ego_state: Tensor):
         x = self.fc(x)
-        x = torch.concat([x, action], dim=-1)
+
+        x = torch.concat([x, action, ego_state], dim=-1)
+
         value = self.model(x).squeeze(dim=-1)
 
         return value
@@ -290,8 +287,9 @@ class ValueDecoder(nn.Module):
 
 class MyModel(nn.Module):
     def __init__(self,
-                 action_dim: int = 2,
                  cell_size: int = DYNAMIC_EMBED_SIZE,
+                 ego_state_size: int = 3,
+                 action_size: int = 2
                  ):
         super().__init__()
 
@@ -300,11 +298,21 @@ class MyModel(nn.Module):
 
         self.encoder = ConvEncoder()
         self.cell = nn.GRU(STATIC_EMBED_SIZE, cell_size, batch_first=True)
+
         self.tl_decoder = TrafficLightDecoder(EMBED_SIZE)
         self.junction_decoder = JunctionDecoder(STATIC_EMBED_SIZE)
         self.speed_decoder = SpeedDecoder(DYNAMIC_EMBED_SIZE)
-        self.actor = ActionDecoder(action_dim)
-        self.critic = ValueDecoder()
+
+        self.actor = ActionDecoder(
+            action_size,
+            EMBED_SIZE,
+            ego_state_size
+        )
+        self.critic = ValueDecoder(
+            EMBED_SIZE,
+            action_size,
+            ego_state_size
+        )
 
     def reset_cell(self):
         self.cell_state = None
@@ -342,26 +350,30 @@ class MyModel(nn.Module):
     def actor_decode(self,
                      dynamic_embed: Tensor,
                      static_embed: Tensor,
-                     command: [List[RoadOption], RoadOption]
+                     command: Union[ndarray, RoadOption],
+                     ego_state: Tensor
                      ):
         embed = torch.concat([dynamic_embed, static_embed], dim=-1)
-        if not isinstance(command, list):
-            command = [command] * len(dynamic_embed)
-        action_dist = self.actor(embed, command)
+        action_dist = self.actor(embed, command, ego_state)
 
         return action_dist
 
     def critic_decode(self,
                       dynamic_embed: Tensor,
                       static_embed: Tensor,
-                      action: Tensor
+                      action: Tensor,
+                      ego_state: Tensor
                       ):
         embed = torch.concat([dynamic_embed, static_embed], dim=-1)
-        value = self.critic(embed, action)
+        value = self.critic(embed, action, ego_state)
 
         return value
 
-    def forward(self, x: Tensor, command: List[RoadOption]):
+    def forward(self,
+                x: Tensor,
+                command: Union[ndarray, RoadOption],
+                ego_state: Tensor
+                ):
         dynamic_embed, static_embed = self.encode(x)
 
-        return self.actor_decode(dynamic_embed, static_embed, command)
+        return self.actor_decode(dynamic_embed, static_embed, command, ego_state)

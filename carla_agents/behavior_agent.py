@@ -61,11 +61,10 @@ class BehaviorAgent(BasicAgent):
         self._look_ahead_steps = 0
 
         # Traffic light information
-        self._tl_affected = False
-        self._tl_state = carla.TrafficLightState.Unknown
+        self._tl_state = None
 
     def get_state_traffic_light(self):
-        return self._tl_affected, self._tl_state
+        return self._tl_state
 
     def get_state_speed(self):
         return self._speed
@@ -92,7 +91,7 @@ class BehaviorAgent(BasicAgent):
         if self._incoming_direction is None:
             self._incoming_direction = RoadOption.LANEFOLLOW
 
-        self._tl_affected, self._tl_state = self._affected_by_traffic_light()
+        self._tl_state = self._affected_by_traffic_light()
 
     def _tailgating(self, waypoint, vehicle_list):
         """
@@ -149,7 +148,7 @@ class BehaviorAgent(BasicAgent):
         ego_vehicle_wp = self._map.get_waypoint(ego_vehicle_loc)
 
         # 1: Red lights and stops behavior
-        if self._tl_affected and self._tl_state == carla.TrafficLightState.Red:
+        if self._tl_state is not None and self._tl_state == carla.TrafficLightState.Red:
             return self.emergency_stop()
 
         # 2.1: Pedestrian avoidance behaviors

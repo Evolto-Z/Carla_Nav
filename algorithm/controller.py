@@ -65,7 +65,7 @@ class MyController():
         control.hand_brake = False
         control.manual_gear_shift = False
 
-        self.past_steering = current_steering
+        self._past_steering = current_steering
 
         return control
 

@@ -47,7 +47,7 @@ class DisplayManager:
             self.handle.send(None)
 
     def render(self, image):
-        if self.display is not None:
+        if image is not None and self.display is not None:
             h, w, _ = image.shape
             surface = pygame.surfarray.make_surface(image.swapaxes(0, 1))
             self.display.blit(surface, (0, 0))
